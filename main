@@ -1,0 +1,227 @@
+import cv2
+import numpy as np
+
+def extract_shapes(image_path):
+    # Read the image
+    img = cv2.imread(image_path)
+    # Transform the array
+    gray_scale = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # Implement the Noise Cancellation Method to prevent false positives
+    gray = apply_noise_cancellation(gray_scale) 
+    # Apply thresholding to create a binary image
+    _, thresh = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY_INV)
+    # Find contours of the shapes
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # List to store each shape array to later use
+    shapes = []
+
+    for contour in contours:
+        # Get the bounding rectangle of a contour
+        x, y, w, h = cv2.boundingRect(contour)
+
+        # Calculate 14% of the width and height to reveal Label Area
+        expand_w = int(0.14 * w)
+        expand_h = int(0.14 * h)
+
+        # Use max() and min() to ensure the expanded rectangle remains within the image bounds
+        x_start = max(x - expand_w, 0)
+        y_start = max(y - expand_h, 0)
+        x_end = min(x + w + expand_w, img.shape[1])
+        y_end = min(y + h + expand_h, img.shape[0])
+
+        # Crop the image around the contour with expanded boundaries
+        cropped_image = img[y_start:y_end, x_start:x_end]
+
+        # Store the cropped image array
+        shapes.append(cropped_image)
+
+    return shapes
+
+def identify_shape(contour, gray_img):
+    # First, check for circles using Hough Transform
+    rows = gray_img.shape[0]
+    ###### Note 2 ######
+
+    circles = cv2.HoughCircles(gray_img, cv2.HOUGH_GRADIENT, 1, rows / 8, param1=100, param2=60, minRadius=1, maxRadius=300)
+    if circles is not None:
+        # If circles are detected, consider the shape as a circle
+        return "Circle"
+
+    # If no circles were found, proceed with other shapes
+    perimeter = cv2.arcLength(contour, True)
+    ###### Note 3 ######
+
+    approx = cv2.approxPolyDP(contour, 0.01 * perimeter, True)
+    if len(approx) == 3:
+        return "Triangle"
+    elif len(approx) == 4:
+        aspect_ratio = cv2.boundingRect(approx)[2] / cv2.boundingRect(approx)[3]
+        return "Square" if 0.95 <= aspect_ratio <= 1.05 else "Rectangle"
+    elif len(approx) == 5:
+        return "Pentagon"
+    elif len(approx) == 6:
+        return "Hexagon"
+    else:
+        return "Unknown"  # Fallback for any other polygon
+
+def identify_fill(contour, thresh):
+    # Calculate the area of the contour
+    contour_area = cv2.contourArea(contour)
+    
+    # Determine the bounding rectangle for the contour, which gives us the top-left corner (x, y) and width and height (w, h)
+    x, y, w, h = cv2.boundingRect(contour)
+    
+    # Using the bounding rectangle, create a region of interest (ROI) from the thresholded image
+    # This ROI corresponds to the area where the contour is located
+    roi = thresh[y:y+h, x:x+w]
+    
+    # Calculate the area of the bounding rectangle
+    roi_area = w * h
+    
+    # Calculate the ratio of the contour area to the bounding rectangle's area
+    fill_ratio = contour_area / roi_area
+    
+    # If the fill ratio is greater than 0.5 (50%), we consider the shape to be filled; otherwise, it is hollow
+    # The threshold of 0.5 can be adjusted based on the specific criteria for considering a shape as filled
+    return "Filled" if fill_ratio > 0.5 else "Hollow"
+
+def get_color(contour, img):
+    # Create a mask with the same dimensions as the image, initialized to all zeros (black)
+    # The mask is a single channel image (grayscale) that will be used to isolate the contour
+    mask = np.zeros_like(img)
+    
+    # Draw the contour onto the mask with maximum intensity (white) and filled in
+    # The '-1' argument signifies that all contours should be drawn and 'cv2.FILLED' fills the area bounded by the contour
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+    
+    # Compute the mean color of the area of the image corresponding to the contour
+    # The mask is used to consider only the area of the contour for the mean calculation
+    # The mask is sliced [:,:,:1] to make sure it is used as a single channel mask even if the original image is in color
+    mean_val = cv2.mean(img, mask=mask[:,:,:1])
+    
+    # Return the mean color value as a tuple (mean color for B, G, R channels)
+    return mean_val
+
+###### Note 1 ######
+def apply_noise_cancellation(img):
+    # Apply Gaussian Blur to the image
+    # Gaussian Blur is used to smooth the image and reduce noise by averaging pixel values with a Gaussian function
+    # (5, 5) is the kernel size, which affects the amount of blurring. Larger kernel sizes will produce more blur.
+    # '0' is the standard deviation in the X and Y directions; when set to 0, it is calculated from the kernel size.
+    img = cv2.GaussianBlur(img, (5, 5), 0)
+    
+    # Apply Median Blur to the image
+    # Median Blur is particularly effective at removing salt-and-pepper noise from an image
+    # The function replaces each pixel's value with the median value of the intensities in the kernel size area (5x5 area in this case)
+    # The median is less sensitive to outliers than the mean, making it a better choice for noise reduction in certain types of images
+    img = cv2.medianBlur(img, 5)
+    
+    # Return the noise-reduced image
+    return img
+
+def main(img):
+    # Convert the input image to grayscale for further processing
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to the grayscale image to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Further process the gray image to reduce noise, possibly using additional methods
+    processed_gray = apply_noise_cancellation(gray)
+
+    # Threshold the blurred image to create a binary image for contour detection
+    _, thresh = cv2.threshold(blurred, 220, 255, cv2.THRESH_BINARY_INV)
+
+    # Find contours of all shapes in the binary image
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # If no contours are detected, exit the function with a message
+    if not contours:
+        print("No contours found")
+        return None
+    
+    # Among all detected contours, identify the largest one as it's assumed to be the shape of interest
+    largest_contour = max(contours, key=cv2.contourArea)
+    
+    # Focus on processing only the largest contour
+    contours = [largest_contour]
+
+    # Create a copy of the original image to perform circle detection
+    detected_circles_img = img.copy()
+
+    # Prepare the image for circle detection by converting it to grayscale and applying median blur
+    gray_for_circles = cv2.cvtColor(detected_circles_img, cv2.COLOR_BGR2GRAY)
+    gray_for_circles = cv2.medianBlur(gray_for_circles, 5)
+
+    # Detect circles in the image using Hough Transform
+    circles = cv2.HoughCircles(gray_for_circles, cv2.HOUGH_GRADIENT, 1, minDist=20,
+                               param1=50, param2=30, minRadius=0, maxRadius=0)
+    
+    # If any circles are detected, draw them on the copy of the image
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        for i in circles[0, :]:
+            center = (i[0], i[1])
+            radius = i[2]
+            cv2.circle(detected_circles_img, center, radius, (255, 0, 255), 3)
+
+    # Iterate over the contours to identify the shape, fill type, and color
+    for contour in contours:
+        shape = identify_shape(contour, processed_gray)
+        fill_type = identify_fill(contour, thresh)
+        color = get_color(contour, img)
+
+        # Simplified color identification logic for fundamental colors
+        colors = {
+            'red': (color[2] > 150 and color[1] < 50 and color[0] < 50),
+            'green': (color[2] < 50 and color[1] > 150 and color[0] < 50),
+            'blue': (color[2] < 50 and color[1] < 50 and color[0] > 150),
+            'white': (color[2] > 200 and color[1] > 200 and color[0] > 200),
+            'black': (color[2] < 50 and color[1] < 50 and color[0] < 50),
+            'yellow': (color[2] > 150 and color[1] > 150 and color[0] < 50)
+        }
+        object_color = 'unknown'
+        for key, value in colors.items():
+            if value:
+                object_color = key
+                break
+
+        # Get the bounding rectangle of the contour to place the text correctly
+        x, y, w, h = cv2.boundingRect(contour)
+
+        # Ensure the text label does not go outside the image bounds
+        text_x = x if x > 0 else 0
+        text_y = y if y > 10 else 10
+        
+        # Draw a bounding rectangle around the detected shape and put a label on it
+        cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 255), 2)
+        cv2.putText(img, f"{shape}, {fill_type}, {object_color}", (text_x, text_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        
+    cv2.imshow('Detected Shapes', img)
+
+    # Save the image
+    output_path = image_path.split('.')[0] + '_labeled.' + image_path.split('.')[1]
+    cv2.imwrite(output_path, img)
+
+    return output_path
+
+# Points to an image with multiple geometrical shapes
+image_path = 'tahas.png'
+
+# 'extract_shapes' function is called to extract individual shapes from the provided image
+# This function is expected to return a list of cropped images, each containing a single shape
+extracted_shapes = extract_shapes(image_path)
+
+# Iterate through each extracted shape
+for i in extracted_shapes:
+    # The 'main' function is called on each cropped shape image
+    # This function is expected to perform certain operations such as shape detection,
+    # noise cancellation, and possibly more, depending on its implementation
+    main(i)
+
+    # 'cv2.waitKey(0)' waits for a key press to proceed to the next shape
+    cv2.waitKey(0)
+
+    # 'cv2.destroyAllWindows()' closes all OpenCV windows opened during the process
+    cv2.destroyAllWindows()
